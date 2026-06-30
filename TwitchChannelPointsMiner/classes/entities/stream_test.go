@@ -34,7 +34,7 @@ func TestStreamUpdateAndFlags(t *testing.T) {
 
 func TestStreamWatchProgress(t *testing.T) {
 	stream := NewStream()
-	stream.lastMinuteUpdate = time.Now().Add(-2 * time.Minute)
+	stream.lastMinuteUpdate = time.Now().Add(-114 * time.Second) // ~1.9 min, safe from >2.0 reset
 	stream.UpdateMinuteWatched()
 	if stream.MinuteWatched < 1.9 || stream.MinuteWatched > 2.1 {
 		t.Fatalf("minute watched out of range: %f", stream.MinuteWatched)

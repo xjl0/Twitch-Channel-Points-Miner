@@ -55,7 +55,7 @@ const (
 	watchPriorityPointsDescending
 )
 
-const maxConcurrentWatchers = 2
+const defaultMaxWatchers = 2
 
 func defaultWatchPriorities() []watchPriority {
 	return []watchPriority{
@@ -172,6 +172,8 @@ type Miner struct {
 	currentWatchMu             sync.Mutex
 	externalWatches            map[string]time.Time
 	externalWatchMu            sync.Mutex
+	appWatchHistory            map[string]time.Time
+	appWatchHistoryMu          sync.Mutex
 	lastWatchSlotCount         int
 	// showDropsIndicator         bool
 }
@@ -496,7 +498,7 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 		}
 		m.externalWatchMu.Unlock()
 
-		effectiveMax := maxConcurrentWatchers - externalCount
+		effectiveMax := defaultMaxWatchers - externalCount
 		if effectiveMax < 0 {
 			effectiveMax = 0
 		}
@@ -566,6 +568,12 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 				if streamer.Stream != nil && (prevBroadcastID != streamer.Stream.BroadcastID || !prevCreatedAt.Equal(streamer.Stream.CreatedAt) || prevWatchStreakMissing != streamer.Stream.WatchStreakMissing) {
 					m.syncWarmStartCacheFromStreamer(streamer)
 				}
+				m.appWatchHistoryMu.Lock()
+				if m.appWatchHistory == nil {
+					m.appWatchHistory = make(map[string]time.Time)
+				}
+				m.appWatchHistory[m.activeStreakWatchKey(streamer)] = time.Now()
+				m.appWatchHistoryMu.Unlock()
 			}
 			m.syncActiveStreakWatch(streamer, time.Now())
 
@@ -844,12 +852,12 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 		return out
 	}
 
-	selected := make([]int, 0, maxConcurrentWatchers)
+	selected := make([]int, 0, defaultMaxWatchers)
 	seen := make(map[int]struct{})
 	selectedGames := make(map[string]struct{})
 	selectedReason := make(map[int]string)
 	add := func(c candidate, reason string, force bool) {
-		if len(selected) >= maxConcurrentWatchers {
+		if len(selected) >= defaultMaxWatchers {
 			return
 		}
 		if _, ok := seen[c.idx]; ok {
@@ -886,7 +894,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 	pick := func(list []candidate, includeGameRank bool, less func(a, b candidate) bool, reason string, force bool) {
 		for _, c := range sortCandidates(list, less, includeGameRank) {
 			add(c, reason, force)
-			if len(selected) >= maxConcurrentWatchers {
+			if len(selected) >= defaultMaxWatchers {
 				break
 			}
 		}
@@ -913,7 +921,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 		}
 		for _, c := range sortCandidates(activeStreaks, nil, false) {
 			add(c, "ACTIVE_STREAK", true)
-			if len(selected) >= maxConcurrentWatchers {
+			if len(selected) >= defaultMaxWatchers {
 				break
 			}
 		}
@@ -923,7 +931,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 	skipEarlyStreak := len(m.gamePriority) > 0 && !hasPriorityGameStreak
 
 	for _, priority := range m.watchPriorities {
-		if len(selected) >= maxConcurrentWatchers {
+		if len(selected) >= defaultMaxWatchers {
 			break
 		}
 		switch priority {
@@ -953,7 +961,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 					}
 					for _, c := range sortCandidates(activeOrder, nil, false) {
 						add(c, "ORDER_SLOT", true)
-						if len(selected) >= maxConcurrentWatchers {
+						if len(selected) >= defaultMaxWatchers {
 							break
 						}
 					}
@@ -1058,7 +1066,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 			break
 		}
 		if streakPick != nil {
-			if len(selected) < maxConcurrentWatchers {
+			if len(selected) < defaultMaxWatchers {
 				add(*streakPick, "FORCE_STREAK_SLOT2", true)
 			} else {
 				keepIdx := selected[0]
@@ -1068,7 +1076,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 				if keepCand, ok := candidateByIdx[keepIdx]; ok {
 					add(keepCand, selectedReason[keepIdx], false)
 				}
-				if len(selected) < maxConcurrentWatchers {
+				if len(selected) < defaultMaxWatchers {
 					if _, ok := seen[streakPick.idx]; !ok {
 						seen[streakPick.idx] = struct{}{}
 						if streakPick.game != "" {
@@ -1090,7 +1098,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 		}
 	}
 
-	if len(selected) < maxConcurrentWatchers {
+	if len(selected) < defaultMaxWatchers {
 		before := len(selected)
 		remaining := make([]candidate, 0, len(candidates))
 		for _, c := range candidates {
@@ -1723,7 +1731,10 @@ func (m *Miner) handlePubSubGain(streamer *entities.Streamer, earned int, reason
 		m.currentWatchMu.Lock()
 		_, appWatching := m.currentWatchKeys[key]
 		m.currentWatchMu.Unlock()
-		if !appWatching {
+		m.appWatchHistoryMu.Lock()
+		lastAppWatch, inHistory := m.appWatchHistory[key]
+		m.appWatchHistoryMu.Unlock()
+		if !appWatching && !inHistory || (inHistory && time.Since(lastAppWatch) > 2*time.Minute) {
 			m.externalWatchMu.Lock()
 			if m.externalWatches == nil {
 				m.externalWatches = make(map[string]time.Time)
