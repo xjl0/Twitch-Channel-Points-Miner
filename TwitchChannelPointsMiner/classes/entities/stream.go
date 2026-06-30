@@ -22,13 +22,14 @@ type Stream struct {
 	SpadeURL          string
 	Payload           []map[string]interface{}
 
-	WatchStreakMissing bool
-	MinuteWatched      float64
-	WatchCount         int
-	CreatedAt          time.Time
-	StreamUpAt         time.Time
-	lastUpdate         time.Time
-	lastMinuteUpdate   time.Time
+	WatchStreakMissing  bool
+	MinuteWatched       float64
+	WatchCount          int
+	CreatedAt           time.Time
+	StreamUpAt          time.Time
+	lastUpdate          time.Time
+	lastMinuteUpdate    time.Time
+	StreakDeferredUntil time.Time
 }
 
 func NewStream() *Stream {
@@ -91,6 +92,7 @@ func (s *Stream) ResetWatchProgress() {
 	s.WatchCount = 0
 	s.CreatedAt = time.Time{}
 	s.lastMinuteUpdate = time.Time{}
+	s.StreakDeferredUntil = time.Time{}
 }
 
 func (s *Stream) LastUpdateAgo() time.Duration {

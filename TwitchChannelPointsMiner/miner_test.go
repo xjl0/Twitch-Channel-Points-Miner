@@ -257,13 +257,19 @@ func TestResolveTimedOutStreak(t *testing.T) {
 	}
 
 	if !m.resolveTimedOutStreak(streamer, now) {
-		t.Fatalf("expected timed-out streak to resolve")
+		t.Fatalf("expected timed-out streak to defer")
 	}
-	if streamer.Stream.WatchStreakMissing {
-		t.Fatalf("timed-out streak should clear pending state")
+	if !streamer.Stream.WatchStreakMissing {
+		t.Fatalf("deferred streak should keep WatchStreakMissing = true")
+	}
+	if streamer.Stream.StreakDeferredUntil.IsZero() || !now.Before(streamer.Stream.StreakDeferredUntil) {
+		t.Fatalf("deferred streak should set future cooldown timestamp")
+	}
+	if streamer.Stream.MinuteWatched != 0 {
+		t.Fatalf("deferred streak should reset MinuteWatched")
 	}
 	if m.resolveTimedOutStreak(streamer, now) {
-		t.Fatalf("resolved streak should not be resolved twice")
+		t.Fatalf("deferred streak should not be deferred twice within cooldown")
 	}
 }
 

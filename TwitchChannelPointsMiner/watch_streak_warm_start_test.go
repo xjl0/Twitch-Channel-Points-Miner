@@ -303,16 +303,22 @@ func TestPickStreamersToWatchPersistsTimedOutStreakToWarmStartCache(t *testing.T
 		warmStartCache: cache,
 	}
 
-	m.pickStreamersToWatch([]*entities.Streamer{streamer})
+	watchList := m.pickStreamersToWatch([]*entities.Streamer{streamer})
 
-	if streamer.Stream.WatchStreakMissing {
-		t.Fatalf("timed-out streak should be marked resolved during watch selection")
+	if len(watchList) == 0 {
+		t.Fatalf("deferred streak streamer should still be in watch list via fallback")
+	}
+	if !streamer.Stream.WatchStreakMissing {
+		t.Fatalf("deferred streak should keep WatchStreakMissing = true")
+	}
+	if streamer.Stream.StreakDeferredUntil.IsZero() || !now.Before(streamer.Stream.StreakDeferredUntil) {
+		t.Fatalf("deferred streak should set future cooldown timestamp")
 	}
 	entry, ok := cache.get("streamer")
 	if !ok {
-		t.Fatalf("timed-out streak should be written to cache")
+		t.Fatalf("deferred streak should be written to cache")
 	}
-	if entry.WatchStreakMissing {
-		t.Fatalf("cache should persist timed-out streak as resolved")
+	if !entry.WatchStreakMissing {
+		t.Fatalf("cache should persist deferred streak as still pending")
 	}
 }

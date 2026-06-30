@@ -31,7 +31,9 @@ const (
 
 const (
 	streakPriorityMinutesBase     = 7.0
-	streakPriorityMinutesExtended = 20.0
+	streakPriorityMinutesExtended = 15.0
+	streakDeferCooldown           = 5 * time.Minute
+	orderWatchSlotDuration        = 45 * time.Minute
 	resolvedStreakCarryoverWindow = 30 * time.Minute
 	falseOfflineStreamStartGrace  = 2 * time.Minute
 )
@@ -162,6 +164,9 @@ type Miner struct {
 	warmStartCachePath         string
 	activeStreakWatches        map[string]activeStreakWatch
 	activeStreakMu             sync.Mutex
+	orderWatchExpiry           map[string]time.Time
+	orderWatchMu               sync.Mutex
+	orderRotationCursor        int
 	// showDropsIndicator         bool
 }
 
@@ -699,10 +704,14 @@ func (m *Miner) resolveTimedOutStreak(streamer *entities.Streamer, now time.Time
 	if !streamer.Settings.WatchStreak || !streamer.Stream.WatchStreakMissing {
 		return false
 	}
+	if !streamer.Stream.StreakDeferredUntil.IsZero() && now.Before(streamer.Stream.StreakDeferredUntil) {
+		return false
+	}
 	if streamer.Stream.MinuteWatched < m.streakPriorityLimit(now) {
 		return false
 	}
-	streamer.Stream.WatchStreakMissing = false
+	streamer.Stream.StreakDeferredUntil = now.Add(streakDeferCooldown)
+	streamer.Stream.MinuteWatched = 0
 	return true
 }
 
@@ -870,7 +879,68 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 		}
 		switch priority {
 		case watchPriorityOrder:
-			pick(candidates, false, nil, "ORDER", false)
+			m.orderWatchMu.Lock()
+			if m.orderWatchExpiry != nil {
+				for k, v := range m.orderWatchExpiry {
+					if now.After(v) {
+						delete(m.orderWatchExpiry, k)
+					}
+				}
+				if len(m.orderWatchExpiry) > 0 {
+					activeOrder := make([]candidate, 0, len(m.orderWatchExpiry))
+					for _, c := range candidates {
+						s := streamers[c.idx]
+						if s == nil {
+							continue
+						}
+						key := m.activeStreakWatchKey(s)
+						if _, ok := m.orderWatchExpiry[key]; ok {
+							if m.shouldPrioritizeStreak(s, now) {
+								delete(m.orderWatchExpiry, key)
+							} else {
+								activeOrder = append(activeOrder, c)
+							}
+						}
+					}
+					for _, c := range sortCandidates(activeOrder, nil, false) {
+						add(c, "ORDER_SLOT", true)
+						if len(selected) >= maxConcurrentWatchers {
+							break
+						}
+					}
+				}
+			}
+			m.orderWatchMu.Unlock()
+
+			before := len(selected)
+			remaining := make([]candidate, 0, len(candidates))
+			for _, c := range candidates {
+				if _, picked := seen[c.idx]; !picked {
+					remaining = append(remaining, c)
+				}
+			}
+			cursor := m.orderRotationCursor
+			rrfn := func(a, b candidate) bool {
+				ai := (a.idx - cursor + len(streamers)) % len(streamers)
+				bi := (b.idx - cursor + len(streamers)) % len(streamers)
+				return ai < bi
+			}
+			pick(remaining, false, rrfn, "ORDER", false)
+			m.orderWatchMu.Lock()
+			if m.orderWatchExpiry == nil {
+				m.orderWatchExpiry = make(map[string]time.Time)
+			}
+			for i := before; i < len(selected); i++ {
+				s := streamers[selected[i]]
+				key := m.activeStreakWatchKey(s)
+				if _, ok := m.orderWatchExpiry[key]; !ok {
+					m.orderWatchExpiry[key] = now.Add(orderWatchSlotDuration)
+				}
+			}
+			if len(selected) > 0 {
+				m.orderRotationCursor = (selected[len(selected)-1] + 1) % len(streamers)
+			}
+			m.orderWatchMu.Unlock()
 		case watchPriorityStreak:
 			if skipEarlyStreak {
 				continue
@@ -972,7 +1042,35 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 	}
 
 	if len(selected) < maxConcurrentWatchers {
-		pick(candidates, true, nil, "FALLBACK", false)
+		before := len(selected)
+		remaining := make([]candidate, 0, len(candidates))
+		for _, c := range candidates {
+			if _, picked := seen[c.idx]; !picked {
+				remaining = append(remaining, c)
+			}
+		}
+		cursor := m.orderRotationCursor
+		rrfn := func(a, b candidate) bool {
+			ai := (a.idx - cursor + len(streamers)) % len(streamers)
+			bi := (b.idx - cursor + len(streamers)) % len(streamers)
+			return ai < bi
+		}
+		pick(remaining, true, rrfn, "FALLBACK", false)
+		m.orderWatchMu.Lock()
+		if m.orderWatchExpiry == nil {
+			m.orderWatchExpiry = make(map[string]time.Time)
+		}
+		for i := before; i < len(selected); i++ {
+			s := streamers[selected[i]]
+			key := m.activeStreakWatchKey(s)
+			if _, ok := m.orderWatchExpiry[key]; !ok {
+				m.orderWatchExpiry[key] = now.Add(orderWatchSlotDuration)
+			}
+		}
+		if len(selected) > 0 {
+			m.orderRotationCursor = (selected[len(selected)-1] + 1) % len(streamers)
+		}
+		m.orderWatchMu.Unlock()
 	}
 
 	watchList := make([]*entities.Streamer, 0, len(selected))
@@ -1058,7 +1156,9 @@ func (m *Miner) shouldPrioritizeStreak(streamer *entities.Streamer, now time.Tim
 	if m.streakCooldownBlocksCurrentStream(streamer, now) {
 		return false
 	}
-	// ? Keep streak priority long enough for Twitch to issue the streak check (typically ~15 minutes).
+	if !streamer.Stream.StreakDeferredUntil.IsZero() && now.Before(streamer.Stream.StreakDeferredUntil) {
+		return false
+	}
 	return streamer.Stream.MinuteWatched < m.streakPriorityLimit(now)
 }
 
@@ -1213,8 +1313,8 @@ func (m *Miner) syncActiveStreakWatch(streamer *entities.Streamer, now time.Time
 }
 
 // ? streakPriorityLimit adjusts streak priority duration:
-// ? - default 7 minutes
-// ? - extended to 20 minutes after 10 hours runtime to avoid churn late in long sessions.
+// ? - default 7 minutes (short watch window + 5 min defer retry)
+// ? - extended to 15 minutes after 10 hours runtime to avoid churn late in long sessions.
 func (m *Miner) streakPriorityLimit(now time.Time) float64 {
 	if m == nil {
 		return streakPriorityMinutesBase
