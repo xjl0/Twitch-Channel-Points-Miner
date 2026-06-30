@@ -34,6 +34,7 @@ const (
 	streakPriorityMinutesExtended = 15.0
 	streakDeferCooldown           = 5 * time.Minute
 	orderWatchSlotDuration        = 45 * time.Minute
+	externalWatchCooldown         = 3 * time.Minute
 	resolvedStreakCarryoverWindow = 30 * time.Minute
 	falseOfflineStreamStartGrace  = 2 * time.Minute
 )
@@ -167,6 +168,11 @@ type Miner struct {
 	orderWatchExpiry           map[string]time.Time
 	orderWatchMu               sync.Mutex
 	orderRotationCursor        int
+	currentWatchKeys           map[string]struct{}
+	currentWatchMu             sync.Mutex
+	externalWatches            map[string]time.Time
+	externalWatchMu            sync.Mutex
+	lastWatchSlotCount         int
 	// showDropsIndicator         bool
 }
 
@@ -467,6 +473,49 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 		}
 
 		watchList := m.pickStreamersToWatch(streamers)
+
+		m.currentWatchMu.Lock()
+		m.currentWatchKeys = make(map[string]struct{}, len(watchList))
+		for _, s := range watchList {
+			if s != nil {
+				m.currentWatchKeys[m.activeStreakWatchKey(s)] = struct{}{}
+			}
+		}
+		m.currentWatchMu.Unlock()
+
+		m.externalWatchMu.Lock()
+		externalCount := 0
+		if m.externalWatches != nil {
+			now := time.Now()
+			for k, v := range m.externalWatches {
+				if now.Sub(v) > externalWatchCooldown {
+					delete(m.externalWatches, k)
+				}
+			}
+			externalCount = len(m.externalWatches)
+		}
+		m.externalWatchMu.Unlock()
+
+		effectiveMax := maxConcurrentWatchers - externalCount
+		if effectiveMax < 0 {
+			effectiveMax = 0
+		}
+		if len(watchList) > effectiveMax {
+			watchList = watchList[:effectiveMax]
+		}
+
+		slotCount := len(watchList)
+		if slotCount != m.lastWatchSlotCount {
+			m.lastWatchSlotCount = slotCount
+			msg := fmt.Sprintf("%d/%d watch slot(s) active", slotCount, effectiveMax)
+			if externalCount > 0 {
+				msg += fmt.Sprintf(" (browser watching %d)", externalCount)
+			}
+			if m.logger != nil {
+				m.logger.Eventf(constants.EventWatchSlots, msg)
+			}
+		}
+
 		if len(watchList) == 0 {
 			if m.sleepWithStop(20*time.Second, stop) {
 				return
@@ -1669,6 +1718,26 @@ func (m *Miner) logPointsDelta(streamer *entities.Streamer, delta int, reason st
 }
 
 func (m *Miner) handlePubSubGain(streamer *entities.Streamer, earned int, reason string, balance int) {
+	if reason == "WATCH" {
+		key := m.activeStreakWatchKey(streamer)
+		m.currentWatchMu.Lock()
+		_, appWatching := m.currentWatchKeys[key]
+		m.currentWatchMu.Unlock()
+		if !appWatching {
+			m.externalWatchMu.Lock()
+			if m.externalWatches == nil {
+				m.externalWatches = make(map[string]time.Time)
+			}
+			m.externalWatches[key] = time.Now()
+			m.externalWatchMu.Unlock()
+			m.logger.Printf("%s WATCH from external source (browser/app) — ⚠ may exceed 2-channel limit!", m.styledStreamerName(streamer))
+		} else {
+			m.externalWatchMu.Lock()
+			delete(m.externalWatches, key)
+			m.externalWatchMu.Unlock()
+		}
+	}
+
 	prev := streamer.ChannelPoints
 	expected := prev + earned
 	prevWatchStreakMissing := true
