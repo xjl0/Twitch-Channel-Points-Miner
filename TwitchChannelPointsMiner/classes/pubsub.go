@@ -32,16 +32,17 @@ type Logger interface {
 var ErrPubSubReconnectRequested = errors.New("pubsub reconnect requested")
 
 type PubSubClient struct {
-	twitch      *Twitch
-	logger      Logger
-	anonymizer  *privacy.Anonymizer
-	disableSSL  bool
-	streamers   []*entities.Streamer
-	streamerMap map[string]*entities.Streamer
-	predictions map[string]*PredictionEvent
-	predMu      sync.Mutex
-	onGain      func(streamer *entities.Streamer, earned int, reason string, balance int)
-	onPresence  func(streamer *entities.Streamer, online bool, reason string)
+	twitch           *Twitch
+	logger           Logger
+	anonymizer       *privacy.Anonymizer
+	disableSSL       bool
+	streamers        []*entities.Streamer
+	streamerMap      map[string]*entities.Streamer
+	predictions      map[string]*PredictionEvent
+	predMu           sync.Mutex
+	onGain           func(streamer *entities.Streamer, earned int, reason string, balance int)
+	onPresence       func(streamer *entities.Streamer, online bool, reason string)
+	onUnknownChannel func(channelID string, reason string)
 }
 
 func (p *PubSubClient) anonymizeLogs() bool {
@@ -93,6 +94,7 @@ func NewPubSubClient(
 	disableSSL bool,
 	onGain func(*entities.Streamer, int, string, int),
 	onPresence func(*entities.Streamer, bool, string),
+	onUnknownChannel func(string, string),
 ) *PubSubClient {
 	streamerMap := make(map[string]*entities.Streamer)
 	for _, s := range streamers {
@@ -101,15 +103,16 @@ func NewPubSubClient(
 		}
 	}
 	return &PubSubClient{
-		twitch:      twitch,
-		logger:      logger,
-		anonymizer:  anonymizer,
-		disableSSL:  disableSSL,
-		streamers:   streamers,
-		streamerMap: streamerMap,
-		predictions: make(map[string]*PredictionEvent),
-		onGain:      onGain,
-		onPresence:  onPresence,
+		twitch:           twitch,
+		logger:           logger,
+		anonymizer:       anonymizer,
+		disableSSL:       disableSSL,
+		streamers:        streamers,
+		streamerMap:      streamerMap,
+		predictions:      make(map[string]*PredictionEvent),
+		onGain:           onGain,
+		onPresence:       onPresence,
+		onUnknownChannel: onUnknownChannel,
 	}
 }
 
@@ -546,6 +549,14 @@ func (p *PubSubClient) processPointsEarned(payload map[string]interface{}, chann
 	}
 	streamer := p.streamerMap[channelID]
 	if streamer == nil {
+		pointGainVal := navigate(data, "point_gain")
+		pointGain, _ := pointGainVal.(map[string]interface{})
+		if pointGain != nil {
+			reason := strings.ToUpper(fmt.Sprint(pointGain["reason_code"]))
+			if p.onUnknownChannel != nil {
+				p.onUnknownChannel(channelID, reason)
+			}
+		}
 		return nil
 	}
 

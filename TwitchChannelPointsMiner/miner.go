@@ -509,9 +509,9 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 		slotCount := len(watchList)
 		if slotCount != m.lastWatchSlotCount {
 			m.lastWatchSlotCount = slotCount
-			msg := fmt.Sprintf("%d/%d watch slot(s) active", slotCount, effectiveMax)
+			msg := fmt.Sprintf("%d/2 watch slot(s) active", slotCount)
 			if externalCount > 0 {
-				msg += fmt.Sprintf(" (browser watching %d)", externalCount)
+				msg += fmt.Sprintf(" — bot idle, browser occupying %d channel(s)", externalCount)
 			}
 			if m.logger != nil {
 				m.logger.Eventf(constants.EventWatchSlots, msg)
@@ -1432,8 +1432,30 @@ func (m *Miner) startPubSub(streamers []*entities.Streamer, stop <-chan struct{}
 		m.DisableSSLCertVerification,
 		m.handlePubSubGain,
 		m.handlePubSubPresence,
+		m.handleUnknownChannelGain,
 	)
 	client.Start(stop)
+}
+
+func (m *Miner) handleUnknownChannelGain(channelID string, reason string) {
+	if reason != "WATCH" || channelID == "" {
+		return
+	}
+	m.appWatchHistoryMu.Lock()
+	_, inHistory := m.appWatchHistory[channelID]
+	m.appWatchHistoryMu.Unlock()
+	if inHistory {
+		return
+	}
+	m.externalWatchMu.Lock()
+	if m.externalWatches == nil {
+		m.externalWatches = make(map[string]time.Time)
+	}
+	m.externalWatches[channelID] = time.Now()
+	m.externalWatchMu.Unlock()
+	if m.logger != nil {
+		m.logger.Printf("⚠ external WATCH on unknown channel %s — slot reduced", channelID)
+	}
 }
 
 func (m *Miner) shutdown(sessionID string) {
@@ -1809,12 +1831,18 @@ func (m *Miner) updateHistory(streamer *entities.Streamer, reason string, amount
 		streamer.Stream.WatchCount++
 		if streamer.Stream.WatchStreakMissing && streamer.Stream.WatchCount >= 2 {
 			markActualStreakCompleted(streamer)
+			if m.logger != nil {
+				m.logger.EmojiEventf(":partying_face:", constants.EventStreakCompleted, "🎉 Streak completed for %s", m.styledStreamerName(streamer))
+			}
 		}
 		m.syncActiveStreakWatch(streamer, time.Now())
 		return
 	}
 	if reason == "WATCH_STREAK" {
 		markActualStreakCompleted(streamer)
+		if m.logger != nil {
+			m.logger.EmojiEventf(":partying_face:", constants.EventStreakCompleted, "🎉 Streak completed for %s (+%d points)", m.styledStreamerName(streamer), amount)
+		}
 	}
 	m.syncActiveStreakWatch(streamer, time.Now())
 }

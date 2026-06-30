@@ -27,6 +27,7 @@ const (
 	EventDropStatus         Event = "DROP_STATUS"
 	EventChatMention        Event = "CHAT_MENTION"
 	EventWatchSlots         Event = "WATCH_SLOTS"
+	EventStreakCompleted    Event = "WATCH_STREAK_COMPLETED"
 )
 
 func NormalizeEventName(raw string) Event {
