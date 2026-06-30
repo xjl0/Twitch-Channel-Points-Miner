@@ -34,7 +34,7 @@ const (
 	streakPriorityMinutesExtended = 15.0
 	streakDeferCooldown           = 5 * time.Minute
 	orderWatchSlotDuration        = 45 * time.Minute
-	externalWatchCooldown         = 3 * time.Minute
+	externalWatchCooldown         = 6 * time.Minute
 	resolvedStreakCarryoverWindow = 30 * time.Minute
 	falseOfflineStreamStartGrace  = 2 * time.Minute
 )
