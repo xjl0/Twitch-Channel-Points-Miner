@@ -1994,7 +1994,7 @@ func (m *Miner) syncChatToWatchlist(watchList []*entities.Streamer) {
 	target := make(map[string]struct{}, len(watchList))
 	for _, s := range watchList {
 		if s != nil && s.IsOnline {
-			target[s.Username] = struct{}{}
+			target[strings.ToLower(s.Username)] = struct{}{}
 		}
 	}
 
@@ -2030,11 +2030,9 @@ func (m *Miner) updateChatPresence(streamer *entities.Streamer, online bool) {
 	if streamer == nil {
 		return
 	}
-	if shouldJoinChat(streamer.Settings.IRCMode, online) {
-		m.startChatWatcher(streamer)
-		return
+	if !online {
+		m.stopChatWatcher(streamer)
 	}
-	m.stopChatWatcher(streamer)
 }
 
 func (m *Miner) startChatWatcher(streamer *entities.Streamer) {
