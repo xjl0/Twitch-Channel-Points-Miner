@@ -1257,10 +1257,19 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 				}
 				m.orderAccumulatedMu.Unlock()
 				maxS := m.orderTotalMaxSeconds(key)
-				if acc > 0 || maxS > 0 {
-					orderTiming = fmt.Sprintf(", watched=%s/%s",
+				m.orderWatchMu.Lock()
+				slotExpire := ""
+				if m.orderWatchExpiry != nil {
+					if exp, ok := m.orderWatchExpiry[key]; ok && now.Before(exp) {
+						slotExpire = fmt.Sprintf(", slot=%s", formatDuration(exp.Sub(now)))
+					}
+				}
+				m.orderWatchMu.Unlock()
+				if acc > 0 || maxS > 0 || slotExpire != "" {
+					orderTiming = fmt.Sprintf(", watched=%s/%s%s",
 						formatDuration(time.Duration(acc)*time.Second),
-						formatDuration(time.Duration(maxS)*time.Second))
+						formatDuration(time.Duration(maxS)*time.Second),
+						slotExpire)
 				}
 			}
 			detail := fmt.Sprintf(
