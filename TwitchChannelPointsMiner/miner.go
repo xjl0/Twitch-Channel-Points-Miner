@@ -549,6 +549,8 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 			}
 		}
 
+		m.syncChatToWatchlist(watchList)
+
 		if len(watchList) == 0 {
 			if m.sleepWithStop(20*time.Second, stop) {
 				return
@@ -1986,6 +1988,42 @@ func (m *Miner) setPresence(streamer *entities.Streamer, online bool, reason str
 		return
 	}
 	m.syncWarmStartCacheFromStreamer(streamer)
+}
+
+func (m *Miner) syncChatToWatchlist(watchList []*entities.Streamer) {
+	target := make(map[string]struct{}, len(watchList))
+	for _, s := range watchList {
+		if s != nil && s.IsOnline {
+			target[s.Username] = struct{}{}
+		}
+	}
+
+	m.chatMu.Lock()
+	for key, watcher := range m.chatWatchers {
+		if _, keep := target[key]; !keep && watcher != nil {
+			delete(m.chatWatchers, key)
+			m.chatMu.Unlock()
+			if m.logger != nil {
+				m.logger.EmojiPrintf(":speech_balloon:", "Leave IRC Chat: %s", key)
+			}
+			watcher.Stop()
+			m.chatMu.Lock()
+		}
+	}
+	m.chatMu.Unlock()
+
+	for _, s := range watchList {
+		if s == nil || !s.IsOnline {
+			continue
+		}
+		key := strings.ToLower(s.Username)
+		m.chatMu.Lock()
+		_, exists := m.chatWatchers[key]
+		m.chatMu.Unlock()
+		if !exists {
+			m.startChatWatcher(s)
+		}
+	}
 }
 
 func (m *Miner) updateChatPresence(streamer *entities.Streamer, online bool) {
