@@ -73,8 +73,8 @@ func randomOrderTotalDuration() float64 {
 }
 
 func (m *Miner) orderTotalMaxSeconds(key string) float64 {
-	m.orderWatchMu.Lock()
-	defer m.orderWatchMu.Unlock()
+	m.orderAccumulatedMu.Lock()
+	defer m.orderAccumulatedMu.Unlock()
 	if m.orderWatchMax == nil {
 		m.orderWatchMax = make(map[string]float64)
 	}
@@ -199,6 +199,7 @@ type Miner struct {
 	orderRotationCursor        int
 	orderWatchAccumulated      map[string]float64
 	orderWatchMax              map[string]float64
+	orderAccumulatedMu         sync.Mutex
 	currentWatchKeys           map[string]struct{}
 	currentWatchMu             sync.Mutex
 	externalWatches            map[string]time.Time
@@ -603,10 +604,12 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 					if prevBroadcastID != streamer.Stream.BroadcastID {
 						key := m.activeStreakWatchKey(streamer)
 						m.orderWatchMu.Lock()
-						delete(m.orderWatchAccumulated, key)
-						delete(m.orderWatchMax, key)
 						delete(m.orderWatchExpiry, key)
 						m.orderWatchMu.Unlock()
+						m.orderAccumulatedMu.Lock()
+						delete(m.orderWatchAccumulated, key)
+						delete(m.orderWatchMax, key)
+						m.orderAccumulatedMu.Unlock()
 					}
 				}
 				m.appWatchHistoryMu.Lock()
@@ -618,12 +621,12 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 				now := time.Now()
 				if !m.shouldPrioritizeStreak(streamer, now) {
 					key := m.activeStreakWatchKey(streamer)
-					m.orderWatchMu.Lock()
+					m.orderAccumulatedMu.Lock()
 					if m.orderWatchAccumulated == nil {
 						m.orderWatchAccumulated = make(map[string]float64)
 					}
 					m.orderWatchAccumulated[key] += 20.0
-					m.orderWatchMu.Unlock()
+					m.orderAccumulatedMu.Unlock()
 				}
 			}
 			m.syncActiveStreakWatch(streamer, time.Now())
@@ -731,13 +734,13 @@ func (m *Miner) watchContext(streamer *entities.Streamer) string {
 
 	var timing string
 	if appWatching {
-		m.orderWatchMu.Lock()
+		m.orderAccumulatedMu.Lock()
 		acc := 0.0
 		if m.orderWatchAccumulated != nil {
 			acc = m.orderWatchAccumulated[key]
 		}
+		m.orderAccumulatedMu.Unlock()
 		maxS := m.orderTotalMaxSeconds(key)
-		m.orderWatchMu.Unlock()
 		watched := formatDuration(time.Duration(acc) * time.Second)
 		total := formatDuration(time.Duration(maxS) * time.Second)
 		timing = fmt.Sprintf("| watched: %s / %s", watched, total)
