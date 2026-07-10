@@ -1247,8 +1247,24 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 				remaining := time.Duration(remainingMinutes * float64(time.Minute))
 				streakRemain = fmt.Sprintf(", streakRemaining=%s", formatDuration(remaining))
 			}
+			orderTiming := ""
+			if s != nil {
+				key := m.activeStreakWatchKey(s)
+				m.orderAccumulatedMu.Lock()
+				acc := 0.0
+				if m.orderWatchAccumulated != nil {
+					acc = m.orderWatchAccumulated[key]
+				}
+				m.orderAccumulatedMu.Unlock()
+				maxS := m.orderTotalMaxSeconds(key)
+				if acc > 0 || maxS > 0 {
+					orderTiming = fmt.Sprintf(", watched=%s/%s",
+						formatDuration(time.Duration(acc)*time.Second),
+						formatDuration(time.Duration(maxS)*time.Second))
+				}
+			}
 			detail := fmt.Sprintf(
-				"%s (reason=%s, streak=%t, priorityGame=%t, rank=%d, pos=%d%s)",
+				"%s (reason=%s, streak=%t, priorityGame=%t, rank=%d, pos=%d%s%s)",
 				m.styledStreamerName(s),
 				reason,
 				cand.isStreakReady,
@@ -1256,6 +1272,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 				cand.rank,
 				cand.position,
 				streakRemain,
+				orderTiming,
 			)
 			lines = append(lines, fmt.Sprintf("SLOT %d: %s", slot+1, detail))
 		}
