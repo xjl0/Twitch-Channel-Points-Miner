@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	mathrand "math/rand"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -33,7 +34,10 @@ const (
 	streakPriorityMinutesBase     = 7.0
 	streakPriorityMinutesExtended = 15.0
 	streakDeferCooldown           = 5 * time.Minute
-	orderWatchSlotDuration        = 45 * time.Minute
+	orderSlotDurationMin          = 25 * time.Minute
+	orderSlotDurationMax          = 50 * time.Minute
+	orderWatchTotalMin            = 2 * time.Hour
+	orderWatchTotalMax            = 5 * time.Hour
 	externalWatchCooldown         = 6 * time.Minute
 	resolvedStreakCarryoverWindow = 30 * time.Minute
 	falseOfflineStreamStartGrace  = 2 * time.Minute
@@ -56,6 +60,31 @@ const (
 )
 
 const defaultMaxWatchers = 2
+
+func randomOrderSlotDuration() time.Duration {
+	delta := int64(orderSlotDurationMax - orderSlotDurationMin)
+	return orderSlotDurationMin + time.Duration(mathrand.Int63n(delta))
+}
+
+func randomOrderTotalDuration() float64 {
+	delta := int64(orderWatchTotalMax - orderWatchTotalMin)
+	d := orderWatchTotalMin + time.Duration(mathrand.Int63n(delta))
+	return d.Seconds()
+}
+
+func (m *Miner) orderTotalMaxSeconds(key string) float64 {
+	m.orderWatchMu.Lock()
+	defer m.orderWatchMu.Unlock()
+	if m.orderWatchMax == nil {
+		m.orderWatchMax = make(map[string]float64)
+	}
+	if v, ok := m.orderWatchMax[key]; ok {
+		return v
+	}
+	v := randomOrderTotalDuration()
+	m.orderWatchMax[key] = v
+	return v
+}
 
 func defaultWatchPriorities() []watchPriority {
 	return []watchPriority{
@@ -168,6 +197,8 @@ type Miner struct {
 	orderWatchExpiry           map[string]time.Time
 	orderWatchMu               sync.Mutex
 	orderRotationCursor        int
+	orderWatchAccumulated      map[string]float64
+	orderWatchMax              map[string]float64
 	currentWatchKeys           map[string]struct{}
 	currentWatchMu             sync.Mutex
 	externalWatches            map[string]time.Time
@@ -567,6 +598,14 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 				m.syncResolvedStreakState(streamer, prevBroadcastID, prevCreatedAt, prevWatchStreakMissing)
 				if streamer.Stream != nil && (prevBroadcastID != streamer.Stream.BroadcastID || !prevCreatedAt.Equal(streamer.Stream.CreatedAt) || prevWatchStreakMissing != streamer.Stream.WatchStreakMissing) {
 					m.syncWarmStartCacheFromStreamer(streamer)
+					if prevBroadcastID != streamer.Stream.BroadcastID {
+						key := m.activeStreakWatchKey(streamer)
+						m.orderWatchMu.Lock()
+						delete(m.orderWatchAccumulated, key)
+						delete(m.orderWatchMax, key)
+						delete(m.orderWatchExpiry, key)
+						m.orderWatchMu.Unlock()
+					}
 				}
 				m.appWatchHistoryMu.Lock()
 				if m.appWatchHistory == nil {
@@ -574,6 +613,16 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 				}
 				m.appWatchHistory[m.activeStreakWatchKey(streamer)] = time.Now()
 				m.appWatchHistoryMu.Unlock()
+				now := time.Now()
+				if !m.shouldPrioritizeStreak(streamer, now) {
+					key := m.activeStreakWatchKey(streamer)
+					m.orderWatchMu.Lock()
+					if m.orderWatchAccumulated == nil {
+						m.orderWatchAccumulated = make(map[string]float64)
+					}
+					m.orderWatchAccumulated[key] += 20.0
+					m.orderWatchMu.Unlock()
+				}
 			}
 			m.syncActiveStreakWatch(streamer, time.Now())
 
@@ -954,6 +1003,9 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 						if _, ok := m.orderWatchExpiry[key]; ok {
 							if m.shouldPrioritizeStreak(s, now) {
 								delete(m.orderWatchExpiry, key)
+							} else if maxS := m.orderTotalMaxSeconds(key); m.orderWatchAccumulated != nil &&
+								m.orderWatchAccumulated[key] >= maxS {
+								delete(m.orderWatchExpiry, key)
 							} else {
 								activeOrder = append(activeOrder, c)
 							}
@@ -972,9 +1024,19 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 			before := len(selected)
 			remaining := make([]candidate, 0, len(candidates))
 			for _, c := range candidates {
-				if _, picked := seen[c.idx]; !picked {
-					remaining = append(remaining, c)
+				if _, picked := seen[c.idx]; picked {
+					continue
 				}
+				s := streamers[c.idx]
+				if s == nil {
+					continue
+				}
+				key := m.activeStreakWatchKey(s)
+				maxS := m.orderTotalMaxSeconds(key)
+				if m.orderWatchAccumulated != nil && m.orderWatchAccumulated[key] >= maxS {
+					continue
+				}
+				remaining = append(remaining, c)
 			}
 			cursor := m.orderRotationCursor
 			rrfn := func(a, b candidate) bool {
@@ -991,7 +1053,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 				s := streamers[selected[i]]
 				key := m.activeStreakWatchKey(s)
 				if _, ok := m.orderWatchExpiry[key]; !ok {
-					m.orderWatchExpiry[key] = now.Add(orderWatchSlotDuration)
+					m.orderWatchExpiry[key] = now.Add(randomOrderSlotDuration())
 				}
 			}
 			if len(selected) > 0 {
@@ -1102,9 +1164,19 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 		before := len(selected)
 		remaining := make([]candidate, 0, len(candidates))
 		for _, c := range candidates {
-			if _, picked := seen[c.idx]; !picked {
-				remaining = append(remaining, c)
+			if _, picked := seen[c.idx]; picked {
+				continue
 			}
+			s := streamers[c.idx]
+			if s == nil {
+				continue
+			}
+			key := m.activeStreakWatchKey(s)
+			maxS := m.orderTotalMaxSeconds(key)
+			if m.orderWatchAccumulated != nil && m.orderWatchAccumulated[key] >= maxS {
+				continue
+			}
+			remaining = append(remaining, c)
 		}
 		cursor := m.orderRotationCursor
 		rrfn := func(a, b candidate) bool {
@@ -1121,7 +1193,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 			s := streamers[selected[i]]
 			key := m.activeStreakWatchKey(s)
 			if _, ok := m.orderWatchExpiry[key]; !ok {
-				m.orderWatchExpiry[key] = now.Add(orderWatchSlotDuration)
+				m.orderWatchExpiry[key] = now.Add(randomOrderSlotDuration())
 			}
 		}
 		if len(selected) > 0 {
