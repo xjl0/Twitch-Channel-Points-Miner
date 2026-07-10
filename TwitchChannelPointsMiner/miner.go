@@ -722,18 +722,32 @@ func (m *Miner) gameInfo(streamer *entities.Streamer) string {
 }
 
 func (m *Miner) watchContext(streamer *entities.Streamer) string {
-	// name, hasDrops := m.gameInfo(streamer)
+	key := m.activeStreakWatchKey(streamer)
+	m.currentWatchMu.Lock()
+	_, appWatching := m.currentWatchKeys[key]
+	m.currentWatchMu.Unlock()
+
+	var timing string
+	if appWatching {
+		m.orderWatchMu.Lock()
+		acc := 0.0
+		if m.orderWatchAccumulated != nil {
+			acc = m.orderWatchAccumulated[key]
+		}
+		maxS := m.orderTotalMaxSeconds(key)
+		m.orderWatchMu.Unlock()
+		watched := formatDuration(time.Duration(acc) * time.Second)
+		total := formatDuration(time.Duration(maxS) * time.Second)
+		timing = fmt.Sprintf("| watched: %s / %s", watched, total)
+	}
+
 	name := m.gameInfo(streamer)
 	if name != "" {
-		label := fmt.Sprintf("| %sGame:%s", colorGameLabel, colorReset)
-		// if hasDrops {
-		// 	return fmt.Sprintf("%s %s %s", label, name, m.dropIndicator())
-		// }
-		return fmt.Sprintf("%s %s", label, name)
+		return fmt.Sprintf("| %sGame:%s %s%s", colorGameLabel, colorReset, name, timing)
 	}
-	// if hasDrops {
-	// 	return m.dropIndicator()
-	// }
+	if timing != "" {
+		return timing
+	}
 	return ""
 }
 
