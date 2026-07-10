@@ -2006,7 +2006,7 @@ func (m *Miner) syncChatToWatchlist(watchList []*entities.Streamer) {
 			if m.logger != nil {
 				m.logger.EmojiPrintf(":speech_balloon:", "Leave IRC Chat: %s", key)
 			}
-			watcher.Stop()
+			go watcher.Stop()
 			m.chatMu.Lock()
 		}
 	}
