@@ -37,7 +37,7 @@ const (
 	orderSlotDurationMin          = 25 * time.Minute
 	orderSlotDurationMax          = 50 * time.Minute
 	orderWatchTotalMin            = 2 * time.Hour
-	orderWatchTotalMax            = 5 * time.Hour
+	orderWatchTotalMax            = 4 * time.Hour
 	externalWatchCooldown         = 6 * time.Minute
 	resolvedStreakCarryoverWindow = 30 * time.Minute
 	falseOfflineStreamStartGrace  = 2 * time.Minute
@@ -535,7 +535,11 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 			effectiveMax = 0
 		}
 		if len(watchList) > effectiveMax {
+			dropped := len(watchList) - effectiveMax
 			watchList = watchList[:effectiveMax]
+			if m.logger != nil && externalCount > 0 {
+				m.logger.Printf("browser watching %d channel(s) → reduced app slots from %d to %d", externalCount, effectiveMax+dropped, effectiveMax)
+			}
 		}
 
 		slotCount := len(watchList)
