@@ -576,11 +576,7 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 			effectiveMax = 0
 		}
 		if len(watchList) > effectiveMax {
-			dropped := len(watchList) - effectiveMax
 			watchList = watchList[:effectiveMax]
-			if m.logger != nil && externalCount > 0 {
-				m.logger.Printf("browser watching %d channel(s) → reduced app slots from %d to %d", externalCount, effectiveMax+dropped, effectiveMax)
-			}
 		}
 
 		slotCount := len(watchList)
