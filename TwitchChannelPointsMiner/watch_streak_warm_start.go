@@ -19,14 +19,16 @@ const (
 )
 
 type watchStreakWarmStartEntry struct {
-	AccountName        string    `json:"account_name"`
-	StreamerLogin      string    `json:"streamer_login"`
-	ChannelID          string    `json:"channel_id,omitempty"`
-	BroadcastID        string    `json:"broadcast_id,omitempty"`
-	StreamCreatedAt    time.Time `json:"stream_created_at,omitempty"`
-	WatchStreakMissing bool      `json:"watch_streak_missing"`
-	CheckedAt          time.Time `json:"checked_at,omitempty"`
-	IsOnline           bool      `json:"is_online"`
+	AccountName           string    `json:"account_name"`
+	StreamerLogin         string    `json:"streamer_login"`
+	ChannelID             string    `json:"channel_id,omitempty"`
+	BroadcastID           string    `json:"broadcast_id,omitempty"`
+	StreamCreatedAt       time.Time `json:"stream_created_at,omitempty"`
+	WatchStreakMissing    bool      `json:"watch_streak_missing"`
+	CheckedAt             time.Time `json:"checked_at,omitempty"`
+	IsOnline              bool      `json:"is_online"`
+	OrderWatchAccumulated float64   `json:"order_accumulated_sec,omitempty"`
+	OrderWatchMax         float64   `json:"order_max_sec,omitempty"`
 }
 
 type watchStreakWarmStartFile struct {
@@ -102,6 +104,25 @@ func sameWarmStartStream(entry watchStreakWarmStartEntry, streamer *entities.Str
 	return false
 }
 
+func (c *watchStreakWarmStartCache) orderDataForStreamer(streamer *entities.Streamer, now time.Time) (float64, float64, bool) {
+	if c == nil || streamer == nil || streamer.Stream == nil {
+		return 0, 0, false
+	}
+	c.mu.Lock()
+	entry, ok := c.entries[c.key(streamer.Username)]
+	c.mu.Unlock()
+	if !ok {
+		return 0, 0, false
+	}
+	if !sameWarmStartStream(entry, streamer) {
+		return 0, 0, false
+	}
+	if entry.CheckedAt.IsZero() || now.Sub(entry.CheckedAt) > watchStreakWarmStartFreshness {
+		return 0, 0, false
+	}
+	return entry.OrderWatchAccumulated, entry.OrderWatchMax, true
+}
+
 func (c *watchStreakWarmStartCache) resolvedEntryForStreamer(streamer *entities.Streamer, now time.Time) (watchStreakWarmStartEntry, bool) {
 	if c == nil || streamer == nil {
 		return watchStreakWarmStartEntry{}, false
@@ -133,6 +154,33 @@ func (c *watchStreakWarmStartCache) get(streamerLogin string) (watchStreakWarmSt
 	defer c.mu.Unlock()
 	entry, ok := c.entries[c.key(streamerLogin)]
 	return entry, ok
+}
+
+func (c *watchStreakWarmStartCache) updateOrderCache(streamer *entities.Streamer, accumulatedSec, maxSec float64) {
+	if c == nil || streamer == nil {
+		return
+	}
+	key := c.key(streamer.Username)
+	c.mu.Lock()
+	entry, exists := c.entries[key]
+	if !exists {
+		entry = watchStreakWarmStartEntry{
+			AccountName:   strings.ToLower(strings.TrimSpace(c.accountName)),
+			StreamerLogin: strings.ToLower(strings.TrimSpace(streamer.Username)),
+			ChannelID:     strings.TrimSpace(streamer.ChannelID),
+		}
+		if streamer.Stream != nil {
+			entry.BroadcastID = streamer.Stream.BroadcastID
+			entry.StreamCreatedAt = streamer.Stream.CreatedAt
+		}
+		entry.IsOnline = streamer.IsOnline
+	}
+	entry.CheckedAt = time.Now()
+	entry.OrderWatchAccumulated = accumulatedSec
+	entry.OrderWatchMax = maxSec
+	c.entries[key] = entry
+	c.dirty = true
+	c.mu.Unlock()
 }
 
 func (c *watchStreakWarmStartCache) updateFromStreamer(streamer *entities.Streamer, checkedAt time.Time) {

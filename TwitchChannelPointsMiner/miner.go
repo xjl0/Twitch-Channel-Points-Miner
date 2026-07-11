@@ -323,8 +323,49 @@ func (m *Miner) syncWarmStartCacheFromStreamer(streamer *entities.Streamer) {
 		return
 	}
 	m.warmStartCache.updateFromStreamer(streamer, time.Now())
+	m.syncWarmStartOrderCache(streamer)
 	if err := m.warmStartCache.saveIfDirty(); err != nil && m.logger != nil {
 		m.logger.Debugf("warm-start cache save failed for %s: %v", m.rawStreamerName(streamer.Username), err)
+	}
+}
+
+func (m *Miner) syncWarmStartOrderCache(streamer *entities.Streamer) {
+	if m == nil || m.warmStartCache == nil || streamer == nil {
+		return
+	}
+	key := m.activeStreakWatchKey(streamer)
+	m.orderAccumulatedMu.Lock()
+	acc := 0.0
+	if m.orderWatchAccumulated != nil {
+		acc = m.orderWatchAccumulated[key]
+	}
+	m.orderAccumulatedMu.Unlock()
+	maxS := m.orderTotalMaxSeconds(key)
+	m.warmStartCache.updateOrderCache(streamer, acc, maxS)
+}
+
+func (m *Miner) applyWarmStartOrderCache(streamer *entities.Streamer) {
+	if m == nil || m.warmStartCache == nil || streamer == nil || streamer.Stream == nil || !streamer.IsOnline {
+		return
+	}
+	acc, maxS, ok := m.warmStartCache.orderDataForStreamer(streamer, time.Now())
+	if !ok {
+		return
+	}
+	key := m.activeStreakWatchKey(streamer)
+	m.orderAccumulatedMu.Lock()
+	if m.orderWatchAccumulated == nil {
+		m.orderWatchAccumulated = make(map[string]float64)
+	}
+	m.orderWatchAccumulated[key] = acc
+	m.orderAccumulatedMu.Unlock()
+	if maxS > 0 {
+		m.orderAccumulatedMu.Lock()
+		if m.orderWatchMax == nil {
+			m.orderWatchMax = make(map[string]float64)
+		}
+		m.orderWatchMax[key] = maxS
+		m.orderAccumulatedMu.Unlock()
 	}
 }
 
@@ -1649,6 +1690,7 @@ func (m *Miner) updatePresence(streamer *entities.Streamer) {
 	}
 	if online && !streamer.PresenceKnown {
 		m.applyWarmStartCache(streamer)
+		m.applyWarmStartOrderCache(streamer)
 	}
 	m.setPresence(streamer, online, "poll")
 }
