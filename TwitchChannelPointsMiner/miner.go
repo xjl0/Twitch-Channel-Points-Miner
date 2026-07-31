@@ -38,7 +38,6 @@ const (
 	orderSlotDurationMax          = 50 * time.Minute
 	orderWatchTotalMin            = 2 * time.Hour
 	orderWatchTotalMax            = 4 * time.Hour
-	externalWatchCooldown         = 6 * time.Minute
 	resolvedStreakCarryoverWindow = 30 * time.Minute
 	falseOfflineStreamStartGrace  = 2 * time.Minute
 )
@@ -202,10 +201,6 @@ type Miner struct {
 	orderAccumulatedMu         sync.Mutex
 	currentWatchKeys           map[string]struct{}
 	currentWatchMu             sync.Mutex
-	externalWatches            map[string]time.Time
-	externalWatchMu            sync.Mutex
-	appWatchHistory            map[string]time.Time
-	appWatchHistoryMu          sync.Mutex
 	lastWatchSlotCount         int
 	// showDropsIndicator         bool
 }
@@ -558,36 +553,12 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 		}
 		m.currentWatchMu.Unlock()
 
-		m.externalWatchMu.Lock()
-		externalCount := 0
-		if m.externalWatches != nil {
-			now := time.Now()
-			for k, v := range m.externalWatches {
-				if now.Sub(v) > externalWatchCooldown {
-					delete(m.externalWatches, k)
-				}
-			}
-			externalCount = len(m.externalWatches)
-		}
-		m.externalWatchMu.Unlock()
-
-		effectiveMax := defaultMaxWatchers - externalCount
-		if effectiveMax < 0 {
-			effectiveMax = 0
-		}
-		if len(watchList) > effectiveMax {
-			watchList = watchList[:effectiveMax]
-		}
-
 		slotCount := len(watchList)
 		if slotCount != m.lastWatchSlotCount {
 			m.lastWatchSlotCount = slotCount
 			msg := fmt.Sprintf("%d/2 watch slot(s) active", slotCount)
-			if externalCount > 0 {
-				msg += fmt.Sprintf(" — bot idle, browser occupying %d channel(s)", externalCount)
-			}
 			if m.logger != nil {
-				m.logger.Eventf(constants.EventWatchSlots, msg)
+				m.logger.Eventf(constants.EventWatchSlots, "%s", msg)
 			}
 		}
 
@@ -653,12 +624,6 @@ func (m *Miner) minuteWatcher(streamers []*entities.Streamer, stop <-chan struct
 						m.orderAccumulatedMu.Unlock()
 					}
 				}
-				m.appWatchHistoryMu.Lock()
-				if m.appWatchHistory == nil {
-					m.appWatchHistory = make(map[string]time.Time)
-				}
-				m.appWatchHistory[m.activeStreakWatchKey(streamer)] = time.Now()
-				m.appWatchHistoryMu.Unlock()
 				now := time.Now()
 				if !m.shouldPrioritizeStreak(streamer, now) {
 					key := m.activeStreakWatchKey(streamer)
@@ -1326,7 +1291,7 @@ func (m *Miner) pickStreamersToWatch(streamers []*entities.Streamer) []*entities
 			)
 			lines = append(lines, fmt.Sprintf("SLOT %d: %s", slot+1, detail))
 		}
-		m.logger.Printf(strings.Join(lines, "\n"))
+		m.logger.Printf("%s", strings.Join(lines, "\n"))
 	}
 
 	return watchList
@@ -1590,30 +1555,9 @@ func (m *Miner) startPubSub(streamers []*entities.Streamer, stop <-chan struct{}
 		m.DisableSSLCertVerification,
 		m.handlePubSubGain,
 		m.handlePubSubPresence,
-		m.handleUnknownChannelGain,
+		nil,
 	)
 	client.Start(stop)
-}
-
-func (m *Miner) handleUnknownChannelGain(channelID string, reason string) {
-	if reason != "WATCH" || channelID == "" {
-		return
-	}
-	m.appWatchHistoryMu.Lock()
-	_, inHistory := m.appWatchHistory[channelID]
-	m.appWatchHistoryMu.Unlock()
-	if inHistory {
-		return
-	}
-	m.externalWatchMu.Lock()
-	if m.externalWatches == nil {
-		m.externalWatches = make(map[string]time.Time)
-	}
-	m.externalWatches[channelID] = time.Now()
-	m.externalWatchMu.Unlock()
-	if m.logger != nil {
-		m.logger.Printf("⚠ external WATCH on unknown channel %s — slot reduced", channelID)
-	}
 }
 
 func (m *Miner) shutdown(sessionID string) {
@@ -1907,29 +1851,6 @@ func (m *Miner) logPointsDelta(streamer *entities.Streamer, delta int, reason st
 }
 
 func (m *Miner) handlePubSubGain(streamer *entities.Streamer, earned int, reason string, balance int) {
-	if reason == "WATCH" {
-		key := m.activeStreakWatchKey(streamer)
-		m.currentWatchMu.Lock()
-		_, appWatching := m.currentWatchKeys[key]
-		m.currentWatchMu.Unlock()
-		m.appWatchHistoryMu.Lock()
-		lastAppWatch, inHistory := m.appWatchHistory[key]
-		m.appWatchHistoryMu.Unlock()
-		if !appWatching && !inHistory || (inHistory && time.Since(lastAppWatch) > 2*time.Minute) {
-			m.externalWatchMu.Lock()
-			if m.externalWatches == nil {
-				m.externalWatches = make(map[string]time.Time)
-			}
-			m.externalWatches[key] = time.Now()
-			m.externalWatchMu.Unlock()
-			m.logger.Printf("%s WATCH from external source (browser/app) — ⚠ may exceed 2-channel limit!", m.styledStreamerName(streamer))
-		} else {
-			m.externalWatchMu.Lock()
-			delete(m.externalWatches, key)
-			m.externalWatchMu.Unlock()
-		}
-	}
-
 	prev := streamer.ChannelPoints
 	expected := prev + earned
 	prevWatchStreakMissing := true
